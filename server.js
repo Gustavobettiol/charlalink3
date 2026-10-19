@@ -224,28 +224,67 @@ io.on('connection', (socket) => {
   let currentRoom = null;
 
   socket.on('create room', (data) => {
-    const roomId = generateRoomId();
-    const roomName = data.roomName || `Sala ${roomId.substr(0, 4)}`;
-    
-    rooms.set(roomId, { id: roomId, name: roomName, users: new Set(), createdAt: new Date().toISOString() });
-    users.set(socket.id, { id: socket.id, username: data.username || `Usuario ${socket.id.substr(0, 4)}`, color: getRandomColor(), roomId });
+    const createRoom = async () => {
+      const roomId = generateRoomId();
+      const roomName = data.roomName || `Sala ${roomId.substr(0, 4)}`;
+      const username = data.username || `Usuario ${socket.id.substr(0, 4)}`;
 
-    socket.join(roomId);
-    rooms.get(roomId).users.add(socket.id);
-    currentRoom = roomId;
+      if (isSupabaseEnabled && supabase) {
+        const { error } = await supabase
+          .from('rooms')
+          .insert([{ id: roomId, name: roomName, created_by: username }]);
+        if (error) throw error;
+      }
 
-    socket.emit('room created', { roomId, roomName, username: users.get(socket.id).username });
-    updateRoomUsers(roomId);
-    console.log(`🏠 Sala creada: ${roomId}`);
+      rooms.set(roomId, { id: roomId, name: roomName, users: new Set(), createdAt: new Date().toISOString() });
+      users.set(socket.id, { id: socket.id, username, color: getRandomColor(), roomId });
+      socket.join(roomId);
+      rooms.get(roomId).users.add(socket.id);
+      currentRoom = roomId;
+
+      socket.emit('room created', { roomId, roomName, username });
+      updateRoomUsers(roomId);
+      console.log(`🏠 Sala creada: ${roomId}`);
+    };
+
+    createRoom().catch(err => {
+      console.error('❌ Error al crear sala:', err);
+      socket.emit('room error', { error: 'No se pudo crear la sala. Inténtalo de nuevo.' });
+    });
   });
 
-  socket.on('join room', (data) => {
-    const roomId = data.roomId.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const room = rooms.get(roomId);
+  socket.on('join room', async (data) => {
+    const roomId = data && typeof data.roomId === 'string'
+      ? data.roomId.toUpperCase().replace(/[^A-Z0-9]/g, '')
+      : '';
 
     if (!roomId || roomId.length !== 6) {
       socket.emit('room error', { error: 'Código de sala inválido. Debe tener 6 caracteres.' });
       return;
+    }
+
+    let room = rooms.get(roomId);
+    if (!room && isSupabaseEnabled && supabase) {
+      try {
+        const { data: roomData, error } = await supabase
+          .from('rooms')
+          .select('id, name')
+          .eq('id', roomId)
+          .single();
+
+        if (error && error.code !== 'PGRST116') throw error;
+        if (!roomData) {
+          socket.emit('room error', { error: `La sala "${roomId}" no existe. Verifica el código o crea una nueva sala.` });
+          return;
+        }
+
+        room = { id: roomData.id, name: roomData.name, users: new Set(), createdAt: new Date().toISOString() };
+        rooms.set(roomId, room);
+      } catch (err) {
+        console.error('❌ Error al buscar sala en Supabase:', err);
+        socket.emit('room error', { error: 'No se pudo consultar la sala. Inténtalo de nuevo.' });
+        return;
+      }
     }
 
     if (!room) {
@@ -260,42 +299,130 @@ io.on('connection', (socket) => {
 
     socket.emit('room joined', { roomId, roomName: room.name, username: users.get(socket.id).username });
 
-    // Enviar historial
-    const history = messageHistory.get(roomId) || [];
-    if (history.length > 0) socket.emit('message history', history);
+    if (isSupabaseEnabled && supabase) {
+      try {
+        const { data: messages, error } = await supabase
+          .from('messages')
+          .select('*')
+          .eq('room_id', roomId)
+          .order('created_at', { ascending: false })
+          .limit(100);
+
+        if (error) throw error;
+        socket.emit('message history', (messages || []).reverse());
+      } catch (err) {
+        console.error('❌ Error al cargar historial:', err);
+        socket.emit('message history', []);
+        socket.emit('message error', { error: 'No se pudo cargar el historial de mensajes.' });
+      }
+    } else {
+      socket.emit('message history', (messageHistory.get(roomId) || []).slice(-100));
+    }
 
     socket.to(roomId).emit('user joined', { username: users.get(socket.id).username, message: `${users.get(socket.id).username} se unió al chat` });
     updateRoomUsers(roomId);
     console.log(`👤 ${users.get(socket.id).username} se unió a: ${roomId}`);
   });
 
-  socket.on('chat message', (data) => {
+  socket.on('chat message', async (data) => {
     const user = users.get(socket.id);
-    if (user && currentRoom) {
-      const msg = { id: uuidv4(), username: user.username, color: user.color, message: data.message, timestamp: new Date().toISOString(), type: 'text' };
-      if (!messageHistory.has(currentRoom)) messageHistory.set(currentRoom, []);
-      messageHistory.get(currentRoom).push(msg);
-      io.to(currentRoom).emit('chat message', msg);
+    const roomId = currentRoom;
+    if (user && roomId) {
+      const storedMessage = {
+        id: uuidv4(),
+        room_id: roomId,
+        username: user.username,
+        user_color: user.color,
+        message_type: 'text',
+        content: typeof data.message === 'string' ? data.message : '',
+        created_at: new Date().toISOString()
+      };
+      try {
+        await persistChatMessage(storedMessage);
+      } catch (err) {
+        console.error('❌ Error al guardar mensaje en Supabase:', err);
+        socket.emit('message error', { error: 'No se pudo guardar el mensaje. Inténtalo de nuevo.' });
+        return;
+      }
+      io.to(roomId).emit('chat message', {
+        id: storedMessage.id,
+        username: storedMessage.username,
+        color: storedMessage.user_color,
+        message: storedMessage.content,
+        timestamp: storedMessage.created_at,
+        type: storedMessage.message_type
+      });
     }
   });
 
-  socket.on('voice message', (data) => {
+  socket.on('voice message', async (data) => {
     const user = users.get(socket.id);
-    if (user && currentRoom) {
-      const msg = { id: uuidv4(), username: user.username, color: user.color, audioUrl: data.audioUrl, duration: data.duration, timestamp: new Date().toISOString(), type: 'voice' };
-      if (!messageHistory.has(currentRoom)) messageHistory.set(currentRoom, []);
-      messageHistory.get(currentRoom).push(msg);
-      io.to(currentRoom).emit('voice message', msg);
+    const roomId = currentRoom;
+    if (user && roomId) {
+      const storedMessage = {
+        id: uuidv4(),
+        room_id: roomId,
+        username: user.username,
+        user_color: user.color,
+        message_type: 'voice',
+        content: typeof data.audioUrl === 'string' ? data.audioUrl : '',
+        audio_duration: data.duration || null,
+        created_at: new Date().toISOString()
+      };
+      try {
+        await persistChatMessage(storedMessage);
+      } catch (err) {
+        console.error('❌ Error al guardar mensaje de voz en Supabase:', err);
+        socket.emit('message error', { error: 'No se pudo guardar el mensaje de voz. Inténtalo de nuevo.' });
+        return;
+      }
+      io.to(roomId).emit('voice message', {
+        id: storedMessage.id,
+        username: storedMessage.username,
+        color: storedMessage.user_color,
+        audioUrl: storedMessage.content,
+        duration: storedMessage.audio_duration,
+        timestamp: storedMessage.created_at,
+        type: storedMessage.message_type
+      });
     }
   });
 
-  socket.on('file shared', (data) => {
+  socket.on('file shared', async (data) => {
     const user = users.get(socket.id);
-    if (user && currentRoom) {
-      const msg = { id: uuidv4(), username: user.username, color: user.color, fileUrl: data.fileUrl, fileName: data.fileName, fileSize: data.fileSize, fileType: data.fileType, timestamp: new Date().toISOString(), type: 'file' };
-      if (!messageHistory.has(currentRoom)) messageHistory.set(currentRoom, []);
-      messageHistory.get(currentRoom).push(msg);
-      io.to(currentRoom).emit('file shared', msg);
+    const roomId = currentRoom;
+    if (user && roomId) {
+      const storedMessage = {
+        id: uuidv4(),
+        room_id: roomId,
+        username: user.username,
+        user_color: user.color,
+        message_type: 'file',
+        content: '',
+        file_url: typeof data.fileUrl === 'string' ? data.fileUrl : null,
+        file_name: typeof data.fileName === 'string' ? data.fileName : null,
+        file_size: Number.isFinite(data.fileSize) ? data.fileSize : null,
+        file_type: typeof data.fileType === 'string' ? data.fileType : null,
+        created_at: new Date().toISOString()
+      };
+      try {
+        await persistChatMessage(storedMessage);
+      } catch (err) {
+        console.error('❌ Error al guardar archivo compartido en Supabase:', err);
+        socket.emit('message error', { error: 'No se pudo guardar el archivo compartido. Inténtalo de nuevo.' });
+        return;
+      }
+      io.to(roomId).emit('file shared', {
+        id: storedMessage.id,
+        username: storedMessage.username,
+        color: storedMessage.user_color,
+        fileUrl: storedMessage.file_url,
+        fileName: storedMessage.file_name,
+        fileSize: storedMessage.file_size,
+        fileType: storedMessage.file_type,
+        timestamp: storedMessage.created_at,
+        type: storedMessage.message_type
+      });
     }
   });
 
@@ -331,7 +458,7 @@ io.on('connection', (socket) => {
       const room = rooms.get(currentRoom);
       if (room) {
         room.users.delete(socket.id);
-        if (room.users.size === 0 && currentRoom !== 'general') {
+        if (room.users.size === 0 && currentRoom !== 'general' && room.isForum) {
           rooms.delete(currentRoom);
           messageHistory.delete(currentRoom);
         } else {
@@ -539,6 +666,18 @@ function updateRoomUsers(roomId) {
     }).filter(Boolean);
     io.to(roomId).emit('users update', roomUsers);
   }
+}
+
+async function persistChatMessage(message) {
+  if (isSupabaseEnabled && supabase) {
+    const { error } = await supabase.from('messages').insert([message]);
+    if (error) throw error;
+  }
+
+  if (!messageHistory.has(message.room_id)) messageHistory.set(message.room_id, []);
+  const history = messageHistory.get(message.room_id);
+  history.push(message);
+  if (history.length > 100) history.splice(0, history.length - 100);
 }
 
 function generateRoomId() {

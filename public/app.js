@@ -366,6 +366,10 @@ socket.on('room error', (data) => {
   showNotification(data.error, 'error');
 });
 
+socket.on('message error', (data) => {
+  showNotification(data.error, 'error');
+});
+
 // Actualizar URL con el código de sala
 function updateUrl(roomId) {
   const newUrl = `${window.location.pathname}?room=${roomId}`;
@@ -531,7 +535,7 @@ async function uploadFile(file) {
 
     const data = await response.json();
     if (data.success) {
-      const fileUrl = `/uploads/${data.filename}`;
+      const fileUrl = data.fileUrl;
       socket.emit('file shared', {
         fileUrl,
         fileName: data.originalName,

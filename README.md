@@ -43,6 +43,20 @@ npm start
 - Local: `http://localhost:4000`
 - Red local: `http://10.1.19.2:4000` (tu IP)
 
+## ☁️ Desplegar en Render
+
+1. Crea un **Web Service** conectado a este repositorio.
+2. Usa `npm install` como comando de construcción y `npm start` como comando de inicio.
+3. Añade estas variables de entorno en Render:
+
+```env
+SUPABASE_URL=https://tuproyecto.supabase.co
+SUPABASE_SERVICE_KEY=tu-service-role-key
+SUPABASE_BUCKET=chat-media
+```
+
+La `SUPABASE_SERVICE_KEY` debe guardarse solo como variable privada del servidor en Render; no la incluyas en archivos del repositorio ni en el código del navegador. Ejecuta `supabase.sql` y crea el bucket antes de iniciar el servicio. Render no conserva los archivos del disco local después de reinicios, así que mantén Supabase configurado para almacenar adjuntos en Storage.
+
 ## ✨ Características
 
 | Función | Descripción |
