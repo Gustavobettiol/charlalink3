@@ -42,6 +42,7 @@ npm start
 
 - Local: `http://localhost:4000`
 - Red local: `http://10.1.19.2:4000` (tu IP)
+- Panel admin local: `http://localhost:5000/admin`
 
 ## ☁️ Desplegar en Render
 
@@ -53,9 +54,13 @@ npm start
 SUPABASE_URL=https://tuproyecto.supabase.co
 SUPABASE_SERVICE_KEY=tu-service-role-key
 SUPABASE_BUCKET=chat-media
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=elige-una-clave-segura
 ```
 
-La `SUPABASE_SERVICE_KEY` debe guardarse solo como variable privada del servidor en Render; no la incluyas en archivos del repositorio ni en el código del navegador. Ejecuta `supabase.sql` y crea el bucket antes de iniciar el servicio. Render no conserva los archivos del disco local después de reinicios, así que mantén Supabase configurado para almacenar adjuntos en Storage.
+Guarda `SUPABASE_SERVICE_KEY`, `ADMIN_USERNAME` y `ADMIN_PASSWORD` solo como variables privadas del servicio en Render; no las incluyas en archivos del repositorio ni en el código del navegador. Ejecuta `supabase.sql` y crea el bucket antes de iniciar el servicio. Render no conserva los archivos del disco local después de reinicios, así que mantén Supabase configurado para almacenar adjuntos en Storage.
+
+El panel requiere las credenciales de administrador y está disponible en `/admin` en Render. En ejecución local, el panel también escucha en `http://localhost:5000/admin` (configurable con `ADMIN_PORT`); Render expone un solo puerto por servicio y usa el que asigna en `PORT`. El panel permite listar y previsualizar los archivos del bucket o directorio local de uploads. Los enlaces a archivos de un bucket público siguen siendo públicos, igual que en el chat.
 
 ## ✨ Características
 

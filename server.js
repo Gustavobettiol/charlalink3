@@ -3,6 +3,8 @@ const http = require('http');
 const socketIo = require('socket.io');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const os = require('os');
 require('dotenv').config();
@@ -14,6 +16,10 @@ const io = socketIo(server, {
 });
 
 const PORT = process.env.PORT || 4000;
+const ADMIN_PORT = Number.parseInt(process.env.ADMIN_PORT || '5000', 10);
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 // Verificar si Supabase está configurado correctamente
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -46,7 +52,7 @@ if (!isSupabaseEnabled) {
 
 // Configurar multer
 const storage = isSupabaseEnabled ? multer.memoryStorage() : multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
+  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
   filename: (req, file, cb) => cb(null, `${uuidv4()}-${file.originalname}`)
 });
 
@@ -64,8 +70,98 @@ const upload = multer({
 
 // Middleware
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(UPLOADS_DIR));
 app.use(express.json());
+
+function safeCompare(value, expected) {
+  const valueBuffer = Buffer.from(value);
+  const expectedBuffer = Buffer.from(expected);
+  return valueBuffer.length === expectedBuffer.length &&
+    crypto.timingSafeEqual(valueBuffer, expectedBuffer);
+}
+
+function requireAdmin(req, res, next) {
+  const username = process.env.ADMIN_USERNAME;
+  const password = process.env.ADMIN_PASSWORD;
+  if (!username || !password) {
+    return res.status(503).send('Configura ADMIN_USERNAME y ADMIN_PASSWORD para habilitar el panel.');
+  }
+
+  const match = /^Basic\s+([A-Za-z0-9+/]+={0,2})$/i.exec(req.get('authorization') || '');
+  if (match) {
+    const credentials = Buffer.from(match[1], 'base64').toString('utf8');
+    const separatorIndex = credentials.indexOf(':');
+    if (separatorIndex >= 0 &&
+        safeCompare(credentials.slice(0, separatorIndex), username) &&
+        safeCompare(credentials.slice(separatorIndex + 1), password)) {
+      return next();
+    }
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Panel de administración", charset="UTF-8"');
+  return res.status(401).send('Autenticación requerida.');
+}
+
+app.get(['/admin', '/admin/'], requireAdmin, (req, res, next) => {
+  res.sendFile(path.join(__dirname, 'admin.html'), err => {
+    if (err) next(err);
+  });
+});
+
+app.get('/api/admin/uploads', requireAdmin, async (req, res) => {
+  try {
+    let files;
+    if (isSupabaseEnabled && supabase) {
+      const bucket = process.env.SUPABASE_BUCKET || 'chat-media';
+      files = [];
+      let offset = 0;
+      while (true) {
+        const { data, error } = await supabase.storage
+          .from(bucket)
+          .list('uploads', { limit: 100, offset, sortBy: { column: 'name', order: 'asc' } });
+        if (error) throw error;
+
+        const entries = data || [];
+        for (const entry of entries) {
+          if (!entry.id) continue;
+          const filePath = `uploads/${entry.name}`;
+          files.push({
+            name: entry.name,
+            size: entry.metadata?.size ?? null,
+            contentType: entry.metadata?.mimetype ?? null,
+            updatedAt: entry.updated_at || entry.created_at || null,
+            url: supabase.storage.from(bucket).getPublicUrl(filePath).data.publicUrl
+          });
+        }
+
+        if (entries.length < 100) break;
+        offset += entries.length;
+      }
+    } else {
+      const entries = await fs.promises.readdir(UPLOADS_DIR, { withFileTypes: true });
+      files = await Promise.all(entries
+        .filter(entry => entry.isFile())
+        .map(async entry => {
+          const filePath = path.join(UPLOADS_DIR, entry.name);
+          const stats = await fs.promises.stat(filePath);
+          return {
+            name: entry.name,
+            size: stats.size,
+            contentType: null,
+            updatedAt: stats.mtime.toISOString(),
+            url: `/uploads/${encodeURIComponent(entry.name)}`
+          };
+        }));
+      files.sort((first, second) => first.name.localeCompare(second.name));
+    }
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({ files });
+  } catch (err) {
+    console.error('Error al listar archivos para el panel admin:', err);
+    return res.status(500).json({ error: 'No se pudieron cargar los archivos subidos.' });
+  }
+});
 
 // Ruta para subir archivos
 app.post('/upload', upload.single('file'), async (req, res) => {
@@ -717,6 +813,12 @@ server.listen(PORT, () => {
   console.log('   📁 Compartir archivos');
   console.log('   🎨 Tema oscuro/rojo\n');
 });
+
+if (process.env.RENDER !== 'true' && !process.env.RENDER_SERVICE_ID) {
+  app.listen(ADMIN_PORT, '127.0.0.1', () => {
+    console.log(`🔐 Panel admin local: http://localhost:${ADMIN_PORT}/admin`);
+  });
+}
 
 // ========================================
 // PERFILES DE USUARIO - API

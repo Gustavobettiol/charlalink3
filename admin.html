@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Administración de archivos</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #f5f5f5;
+    }
+
+    body {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.5rem;
+    }
+
+    button, .download {
+      border: 0;
+      border-radius: 6px;
+      padding: 0.65rem 0.9rem;
+      background: #c0392b;
+      color: white;
+      font: inherit;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    #status {
+      min-height: 1.5rem;
+      color: #bbb;
+    }
+
+    #files {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 1rem;
+    }
+
+    article {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #1c1c1c;
+    }
+
+    .preview {
+      display: grid;
+      min-height: 140px;
+      place-items: center;
+      background: #080808;
+    }
+
+    .preview img, .preview video {
+      display: block;
+      max-width: 100%;
+      max-height: 260px;
+    }
+
+    .preview audio {
+      width: calc(100% - 1.5rem);
+    }
+
+    .details {
+      padding: 0.85rem;
+    }
+
+    .name {
+      overflow-wrap: anywhere;
+      margin: 0 0 0.4rem;
+      font-weight: 600;
+    }
+
+    .meta {
+      margin: 0 0 0.8rem;
+      color: #aaa;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Archivos subidos</h1>
+    <button id="refresh" type="button">Actualizar</button>
+  </header>
+  <p id="status" role="status">Cargando archivos...</p>
+  <main id="files" aria-live="polite"></main>
+
+  <script>
+    const filesContainer = document.getElementById('files');
+    const status = document.getElementById('status');
+
+    function formatSize(size) {
+      if (size === null || size === undefined) return 'Tamaño desconocido';
+      if (size < 1024) return `${size} B`;
+      const units = ['KB', 'MB', 'GB', 'TB'];
+      let value = size / 1024;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      return `${value.toFixed(1)} ${units[unit]}`;
+    }
+
+    function createPreview(file) {
+      const preview = document.createElement('div');
+      preview.className = 'preview';
+      const type = file.contentType || '';
+      const extension = file.name.split('.').pop().toLowerCase();
+      const mediaType = type.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(extension)
+        ? 'image'
+        : type.startsWith('video/') || ['mp4', 'webm'].includes(extension)
+          ? 'video'
+          : type.startsWith('audio/') || ['mp3', 'wav', 'ogg'].includes(extension)
+            ? 'audio'
+            : '';
+
+      if (mediaType === 'image') {
+        const image = document.createElement('img');
+        image.src = file.url;
+        image.alt = file.name;
+        image.loading = 'lazy';
+        preview.append(image);
+      } else if (mediaType === 'video') {
+        const video = document.createElement('video');
+        video.src = file.url;
+        video.controls = true;
+        video.preload = 'metadata';
+        preview.append(video);
+      } else if (mediaType === 'audio') {
+        const audio = document.createElement('audio');
+        audio.src = file.url;
+        audio.controls = true;
+        audio.preload = 'metadata';
+        preview.append(audio);
+      } else {
+        preview.textContent = 'Vista previa no disponible';
+      }
+
+      return preview;
+    }
+
+    function createFileCard(file) {
+      const card = document.createElement('article');
+      card.append(createPreview(file));
+
+      const details = document.createElement('div');
+      details.className = 'details';
+
+      const name = document.createElement('p');
+      name.className = 'name';
+      name.textContent = file.name;
+
+      const metadata = document.createElement('p');
+      metadata.className = 'meta';
+      const date = file.updatedAt ? new Date(file.updatedAt).toLocaleString() : 'Fecha desconocida';
+      metadata.textContent = `${formatSize(file.size)} · ${date}`;
+
+      const download = document.createElement('a');
+      download.className = 'download';
+      download.href = file.url;
+      download.target = '_blank';
+      download.rel = 'noopener noreferrer';
+      download.textContent = 'Abrir / descargar';
+
+      details.append(name, metadata, download);
+      card.append(details);
+      return card;
+    }
+
+    async function loadFiles() {
+      status.textContent = 'Cargando archivos...';
+      filesContainer.replaceChildren();
+      try {
+        const response = await fetch('/api/admin/uploads', { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Error HTTP ${response.status}`);
+        }
+        const result = await response.json();
+        for (const file of result.files) {
+          filesContainer.append(createFileCard(file));
+        }
+        status.textContent = result.files.length
+          ? `${result.files.length} archivo(s)`
+          : 'Todavía no hay archivos subidos.';
+      } catch (error) {
+        status.textContent = `No se pudieron cargar los archivos. ${error.message}`;
+      }
+    }
+
+    document.getElementById('refresh').addEventListener('click', loadFiles);
+    loadFiles();
+  </script>
+</body>
+</html>
